@@ -1,36 +1,30 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch.nn import Linear, ReLU, Sigmoid
 from torch_geometric.nn import GCNConv, global_mean_pool
 
 
-class DDIChemGNN(nn.Module):
-    """
-    Simple GCN-based GNN for molecular interaction prediction.
-
-    - Input: merged drug A + drug B molecular graph
-    - Output: probability of interaction in [0,1]
-    """
-
-    def __init__(self, in_channels: int, hidden_channels: int = 64):
+class GNNDrugInteractionModel(torch.nn.Module):
+    def __init__(self, node_feature_dim):
         super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        self.lin1 = nn.Linear(hidden_channels, hidden_channels)
-        self.lin2 = nn.Linear(hidden_channels, 1)
+
+        self.gnn1 = GCNConv(node_feature_dim, 64)
+        self.gnn2 = GCNConv(64, 64)
+
+        self.fc1 = Linear(64, 32)
+        self.fc2 = Linear(32, 1)
+
+        self.relu = ReLU()
+        self.sigmoid = Sigmoid()
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
+        h = self.relu(self.gnn1(x, edge_index))
+        h = self.relu(self.gnn2(h, edge_index))
 
-        x = self.conv2(x, edge_index)
-        x = F.relu(x)
+        graph_emb = global_mean_pool(h, batch)
 
-        # Graph-level embedding (one vector per drug pair)
-        x = global_mean_pool(x, batch)
+        h = self.relu(self.fc1(graph_emb))
+        out = self.sigmoid(self.fc2(h))
 
-        x = F.relu(self.lin1(x))
-        x = torch.sigmoid(self.lin2(x))   # probability
-        return x.view(-1)
+        return out.view(-1)

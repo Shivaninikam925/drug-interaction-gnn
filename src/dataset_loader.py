@@ -1,180 +1,119 @@
 import os
-import random
-import pandas as pd
 import torch
+import pandas as pd
 from rdkit import Chem
 from torch_geometric.data import InMemoryDataset, Data
-from torch_geometric.utils import dense_to_sparse
-import torch_geometric
-import torch.serialization
-
-# ---- Allow PyTorch 2.6 to load PyG Data objects safely ----
-torch.serialization.add_safe_globals([
-    torch_geometric.data.Data,
-])
+from torch_geometric.utils import from_networkx
+import networkx as nx
+import random
 
 
-def generate_negative_samples(df_pos: pd.DataFrame, num_negatives: int) -> pd.DataFrame:
-    """
-    Create negative (non-interaction) drug pairs that do NOT appear
-    in the positive interaction set.
+def mol_to_graph(mol, drug_flag):
+    """Convert an RDKit Mol into a NetworkX graph with node features."""
+    G = nx.Graph()
 
-    Returns a DataFrame with the same columns: ID1, ID2, Y, Side Effect Name, X1, X2.
-    For negatives, X1/X2 are set to 'NONE' and will be replaced by a dummy
-    molecule ('C') later.
-    """
-    print("Generating negative samples...")
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        feat = [
+            atom.GetAtomicNum(),
+            atom.GetTotalDegree(),
+            atom.GetFormalCharge(),
+            int(atom.GetHybridization()),
+            int(atom.GetIsAromatic()),
+            atom.GetTotalNumHs(),
+            drug_flag
+        ]
+        G.add_node(idx, x=torch.tensor(feat, dtype=torch.float))
 
-    # Unique drug IDs from the positive set
-    unique_drugs = list(set(df_pos["ID1"]).union(set(df_pos["ID2"])))
+    for bond in mol.GetBonds():
+        u = bond.GetBeginAtomIdx()
+        v = bond.GetEndAtomIdx()
+        G.add_edge(u, v)
 
-    # All known positive pairs (order-independent)
-    positive_pairs = set(
-        tuple(sorted((row["ID1"], row["ID2"])))
-        for _, row in df_pos.iterrows()
-    )
-
-    negative_pairs = set()
-
-    # Sample until we have the desired number of negatives
-    while len(negative_pairs) < num_negatives:
-        d1, d2 = random.sample(unique_drugs, 2)
-        pair = tuple(sorted((d1, d2)))
-        if pair not in positive_pairs:
-            negative_pairs.add(pair)
-
-    print(f"Generated {len(negative_pairs)} negative samples.")
-
-    neg_df = pd.DataFrame(list(negative_pairs), columns=["ID1", "ID2"])
-    neg_df["Y"] = 0  # label = non-interaction
-    neg_df["Side Effect Name"] = "none"
-    neg_df["X1"] = "NONE"
-    neg_df["X2"] = "NONE"
-
-    return neg_df
+    return G
 
 
-def mol_to_graph(mol: Chem.Mol) -> Data | None:
-    """Convert an RDKit Mol into a simple PyG graph with atom-number features."""
-    if mol is None:
-        return None
-
-    # Node features: here just atomic number → shape [num_atoms, 1]
-    x = torch.tensor(
-        [[atom.GetAtomicNum()] for atom in mol.GetAtoms()],
-        dtype=torch.float,
-    )
-
-    # Adjacency → edge_index (undirected)
-    adj = Chem.GetAdjacencyMatrix(mol)
-    adj = torch.tensor(adj, dtype=torch.float)
-    edge_index = dense_to_sparse(adj)[0]
-
-    return Data(x=x, edge_index=edge_index)
+def combine_graphs(G1, G2):
+    """Merge drug1 and drug2 graphs into a single graph."""
+    return nx.disjoint_union(G1, G2)
 
 
 class TwoSidesDDI(InMemoryDataset):
-    """
-    TWOSIDES-based Drug–Drug Interaction dataset with RDKit graphs + negative sampling.
-
-    Each example is a merged molecular graph of:
-      - Drug A (from SMILES X1)
-      - Drug B (from SMILES X2)
-    with a binary label:
-      - 1.0 => interaction
-      - 0.0 => sampled non-interaction
-    """
-
-    def __init__(self, root: str, transform=None, pre_transform=None,
-                 subset_size: int | None = 5000, include_negatives: bool = True):
+    def __init__(self, root, subset_size=5000, transform=None, pre_transform=None):
         self.subset_size = subset_size
-        self.include_negatives = include_negatives
         super().__init__(root, transform, pre_transform)
 
-        # Important: weights_only=False because this is not a pure weight checkpoint
-        self.data, self.slices = torch.load(
-            self.processed_paths[0],
-            weights_only=False
-        )
+        # Load processed dataset
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
-        # Expect data/raw/two-sides.csv
         return ["two-sides.csv"]
 
     @property
     def processed_file_names(self):
-        return ["twosides_mol_graphs.pt"]
-
-    def download(self):
-        # CSV is assumed to be already present in data/raw
-        pass
+        return ["twosides_rdkit.pt"]
 
     def process(self):
-        print("Processing TWOSIDES into RDKit molecular graphs...")
+        print("Processing...")
+        df = pd.read_csv(self.raw_paths[0])
 
-        df_raw = pd.read_csv(self.raw_paths[0])
+        # Drop rows with missing SMILES
+        df = df.dropna(subset=["X1", "X2"])
 
-        # 1) Positive examples
-        if self.subset_size is not None and self.subset_size < len(df_raw):
-            df_pos = df_raw.sample(self.subset_size, random_state=42).reset_index(drop=True)
-        else:
-            df_pos = df_raw.copy().reset_index(drop=True)
+        # Reduce dataset size
+        df = df.sample(self.subset_size, random_state=42)
 
-        # 2) Negative examples via sampling
-        if self.include_negatives:
-            df_neg = generate_negative_samples(df_pos, num_negatives=len(df_pos))
-            df = pd.concat([df_pos, df_neg], ignore_index=True)
-        else:
-            df = df_pos
+        # --- NEGATIVE SAMPLING (uses valid SMILES) ---
+        pos_pairs = df[["X1", "X2"]].values.tolist()
+        smiles_pool = list(df["X1"]) + list(df["X2"])
 
-        print("Final dataset size (pos + neg):", len(df))
+        neg_samples = set()
+        while len(neg_samples) < len(df):
+            a, b = random.sample(smiles_pool, 2)
+            if [a, b] not in pos_pairs:
+                neg_samples.add((a, b))
 
-        data_list: list[Data] = []
+        neg_df = pd.DataFrame(list(neg_samples), columns=["X1", "X2"])
+        neg_df["Y"] = 0
 
-        for _, row in df.iterrows():
-            # Handle SMILES, including negative samples ("NONE")
-            smiles1 = row["X1"]
-            smiles2 = row["X2"]
+        df_pos = df.copy()
+        df_pos["Y"] = 1
 
-            if pd.isna(smiles1) or smiles1 == "NONE" or str(smiles1).strip() == "":
-                smiles1 = "C"   # dummy one-atom molecule
-            if pd.isna(smiles2) or smiles2 == "NONE" or str(smiles2).strip() == "":
-                smiles2 = "C"
+        # Combine positive + negative
+        df_all = pd.concat([df_pos, neg_df], ignore_index=True)
+        df_all = df_all.sample(frac=1, random_state=42)
 
-            mol1 = Chem.MolFromSmiles(str(smiles1))
-            mol2 = Chem.MolFromSmiles(str(smiles2))
+        print(f"Final dataset size: {len(df_all)}")
+
+        data_list = []
+
+        for _, row in df_all.iterrows():
+            smi1 = row["X1"]
+            smi2 = row["X2"]
+            y = row["Y"]
+
+            mol1 = Chem.MolFromSmiles(smi1)
+            mol2 = Chem.MolFromSmiles(smi2)
 
             if mol1 is None or mol2 is None:
-                continue
+                continue  # skip invalid SMILES
 
-            g1 = mol_to_graph(mol1)
-            g2 = mol_to_graph(mol2)
+            G1 = mol_to_graph(mol1, drug_flag=0)
+            G2 = mol_to_graph(mol2, drug_flag=1)
 
-            if g1 is None or g2 is None:
-                continue
+            G = combine_graphs(G1, G2)
 
-            # Merge the two drug graphs into one
-            offset = g1.x.size(0)
-            x = torch.cat([g1.x, g2.x], dim=0)
-            edge_index = torch.cat(
-                [g1.edge_index, g2.edge_index + offset],
-                dim=1
-            )
+            pyg = from_networkx(G)
 
-            # Binary label: >0 => interaction, 0 => sampled negative
-            label_val = 1.0 if row["Y"] > 0 else 0.0
+            # Convert list of tensors → tensor matrix
+            pyg.x = torch.stack([feat for feat in pyg.x], dim=0)
 
-            data = Data(
-                x=x,
-                edge_index=edge_index,
-                y=torch.tensor([label_val], dtype=torch.float)
-            )
+            pyg.y = torch.tensor([y], dtype=torch.float)
 
-            data_list.append(data)
+            data_list.append(pyg)
 
         data, slices = self.collate(data_list)
-        torch.save((data, slices), self.processed_paths[0])
 
-        print(f"Molecular graph processing complete! Samples: {len(data_list)}")
-        print("Done!")
+        torch.save((data, slices), self.processed_paths[0])
+        print("RDKit graph processing complete.")
