@@ -84,7 +84,7 @@ If you use or reference this project:
   title        = {Drug–Drug Interaction Prediction using Graph Neural Networks},
   year         = {2025},
   note         = {GitHub repository},
-  url          = {https://github.com/shivaninikam925/drug-interaction-gnn}
+  url          = {https://github.com/Shivaninikam925/drug-interaction-gnn}
 }
 
 ## Contact
