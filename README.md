@@ -29,7 +29,7 @@ Drug B identifier (ID2)
 
 Binary interaction label
 
-Optional side-effect descriptions (not used in this version)
+Optional side-effect descriptions 
 
 For efficient experimentation, the current workflow processes a 10,000-sample subset, though the code supports the complete dataset.
 
@@ -54,7 +54,7 @@ A final linear layer for binary classification
  Drug B (node) ----/
 
 
-This design focuses on relational structure rather than chemical features, which will be introduced in later versions.
+This design focuses on relational structure rather than chemical features.
 
 ## Training Results
 
@@ -66,20 +66,6 @@ Test accuracy reaches approximately 99%
 (expected given identifier-only embeddings)
 
 Future work will replace ID embeddings with chemical fingerprints to produce more realistic results.
-
-## Repository Structure
-src/
-  dataset_loader.py       # TWOSIDES → PyTorch Geometric processing
-  gnn_model.py            # GCN architecture
-  train.py                # Training loop and evaluation
-
-data/
-  raw/                    # two-sides.csv (user-supplied)
-  processed/              # Cached PyG dataset files
-
-results/
-  metrics/                # Evaluation metrics (planned)
-  figures/                # Visualizations (planned)
 
 ## Relevant Literature
 
@@ -98,7 +84,7 @@ If you use or reference this project:
   title        = {Drug–Drug Interaction Prediction using Graph Neural Networks},
   year         = {2025},
   note         = {GitHub repository},
-  url          = {https://github.com/your-username/drug-interaction-gnn}
+  url          = {https://github.com/shivaninikam925/drug-interaction-gnn}
 }
 
 ## Contact
