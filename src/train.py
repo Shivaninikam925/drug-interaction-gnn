@@ -1,78 +1,137 @@
 import torch
 from torch_geometric.loader import DataLoader
+from sklearn.metrics import roc_auc_score, average_precision_score
+
 from dataset_loader import TwoSidesDDI
-from gnn_model import GNNDrugInteractionModel
-from sklearn.model_selection import train_test_split
-import numpy as np
+from gnn_model import DDIChemGNN
 
-# Load Dataset
-print("Loading TWOSIDES dataset...")
 
-dataset = TwoSidesDDI(root="data", subset_size=10000)
-print("Dataset size:", len(dataset))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Train-test split
-indices = list(range(len(dataset)))
-train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42)
 
-train_dataset = dataset[train_idx]
-test_dataset = dataset[test_idx]
+def binarize_labels(y_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Ensure labels are strictly 0/1.
+    (Dataset already stores 0/1, but this is a safe guard.)
+    """
+    return (y_tensor > 0).float()
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32)
 
-# Initialize Model
-num_drugs = dataset.num_drugs
+def get_data_loaders(root: str = "data", subset_size: int = 5000,
+                     batch_size: int = 32):
+    dataset = TwoSidesDDI(root=root, subset_size=subset_size, include_negatives=True)
 
-model = GNNDrugInteractionModel(
-    num_drugs=num_drugs,
-    embed_dim=32,
-    hidden_dim=64
-)
+    print("Total graphs:", len(dataset))
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-loss_fn = torch.nn.BCELoss()
+    total = len(dataset)
+    train_size = int(0.8 * total)
+    val_size = int(0.1 * total)
+    test_size = total - train_size - val_size
 
-# Train 
-def train():
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, test_loader, dataset
+
+
+def train_one_epoch(model, loader, optimizer, loss_fn):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
 
-    for batch in train_loader:
+    for batch in loader:
+        batch = batch.to(device)
         optimizer.zero_grad()
 
-        out = model(batch)  # shape: [batch_size]
-        y = batch.y.view(-1)  # ensure same shape
+        out = model(batch)                     # [batch_size]
+        targets = binarize_labels(batch.y).view(-1).to(device)
 
-        loss = loss_fn(out, y)
+        loss = loss_fn(out, targets)
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() * batch.num_graphs
 
-    return total_loss / len(train_loader)
+    return total_loss / len(loader.dataset)
 
-# Evaluation
-def evaluate():
+
+@torch.no_grad()
+def evaluate(model, loader):
     model.eval()
-    correct = 0
-    total = 0
+    all_probs = []
+    all_targets = []
 
-    with torch.no_grad():
-        for batch in test_loader:
-            preds = model(batch)
-            preds = (preds > 0.5).float()
+    for batch in loader:
+        batch = batch.to(device)
 
-            labels = batch.y.view(-1)
-            correct += (preds == labels).sum().item()
-            total += len(labels)
+        probs = model(batch)   # [batch_size], already sigmoid
+        targets = binarize_labels(batch.y).view(-1).to(device)
 
-    return correct / total
+        all_probs.append(probs.detach().cpu())
+        all_targets.append(targets.detach().cpu())
 
-# Training
-for epoch in range(1, 11):
-    loss = train()
-    acc = evaluate()
-    print(f"Epoch {epoch:02d} | Loss: {loss:.4f} | Test Accuracy: {acc:.4f}")
+    all_probs = torch.cat(all_probs).numpy()
+    all_targets = torch.cat(all_targets).numpy()
 
-print("Training complete!")
+    # Accuracy at 0.5 threshold
+    preds = (all_probs >= 0.5).astype("int32")
+    acc = (preds == all_targets).mean()
+
+    # ROC-AUC and PR-AUC
+    try:
+        roc = roc_auc_score(all_targets, all_probs)
+    except ValueError:
+        roc = float("nan")
+
+    try:
+        pr = average_precision_score(all_targets, all_probs)
+    except ValueError:
+        pr = float("nan")
+
+    return acc, roc, pr
+
+
+def main():
+    train_loader, val_loader, test_loader, dataset = get_data_loaders(
+        root="data",
+        subset_size=5000,
+        batch_size=32,
+    )
+
+    in_channels = dataset[0].x.size(1)
+    print("Node feature dim:", in_channels)
+
+    model = DDIChemGNN(in_channels=in_channels, hidden_channels=64).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = torch.nn.BCELoss()
+
+    epochs = 10
+
+    for epoch in range(1, epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn)
+        val_acc, val_roc, val_pr = evaluate(model, val_loader)
+
+        print(
+            f"Epoch {epoch:02d} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Acc: {val_acc:.4f} | "
+            f"Val ROC-AUC: {val_roc:.4f} | "
+            f"Val PR-AUC: {val_pr:.4f}"
+        )
+
+    # Final test evaluation
+    test_acc, test_roc, test_pr = evaluate(model, test_loader)
+    print("\nFinal Test Metrics:")
+    print(f"Accuracy : {test_acc:.4f}")
+    print(f"ROC-AUC  : {test_roc:.4f}")
+    print(f"PR-AUC   : {test_pr:.4f}")
+
+
+if __name__ == "__main__":
+    main()
