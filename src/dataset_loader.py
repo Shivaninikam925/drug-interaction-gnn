@@ -1,50 +1,72 @@
 import os
 import torch
 import pandas as pd
+import numpy as np
 from rdkit import Chem
-from torch_geometric.data import InMemoryDataset, Data
-from torch_geometric.utils import from_networkx
-import networkx as nx
-import random
+from rdkit.Chem import AllChem
+from rdkit import RDLogger
+from torch_geometric.data import Data, InMemoryDataset
+
+RDLogger.DisableLog('rdApp.*')
 
 
-def mol_to_graph(mol, drug_flag):
-    """Convert an RDKit Mol into a NetworkX graph with node features."""
-    G = nx.Graph()
-
-    for atom in mol.GetAtoms():
-        idx = atom.GetIdx()
-        feat = [
-            atom.GetAtomicNum(),
-            atom.GetTotalDegree(),
-            atom.GetFormalCharge(),
-            int(atom.GetHybridization()),
-            int(atom.GetIsAromatic()),
-            atom.GetTotalNumHs(),
-            drug_flag
-        ]
-        G.add_node(idx, x=torch.tensor(feat, dtype=torch.float))
-
-    for bond in mol.GetBonds():
-        u = bond.GetBeginAtomIdx()
-        v = bond.GetEndAtomIdx()
-        G.add_edge(u, v)
-
-    return G
+def atom_features(atom):
+    return torch.tensor([
+        atom.GetAtomicNum(),
+        atom.GetDegree(),
+        atom.GetFormalCharge(),
+        atom.GetTotalNumHs(),
+        int(atom.GetIsAromatic()),
+        int(atom.GetImplicitValence()),
+        int(atom.GetExplicitValence()),
+    ], dtype=torch.float)
 
 
-def combine_graphs(G1, G2):
-    """Merge drug1 and drug2 graphs into a single graph."""
-    return nx.disjoint_union(G1, G2)
+def mol_to_graph(mol):
+    if mol is None:
+        return None
+
+    atoms = mol.GetAtoms()
+    if len(atoms) == 0:
+        return None
+
+    x = torch.stack([atom_features(a) for a in atoms], dim=0)
+
+    edge_index = []
+    edge_attr = []
+    for b in mol.GetBonds():
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        bt = float(b.GetBondTypeAsDouble())
+        edge_index += [[i, j], [j, i]]
+        edge_attr += [[bt], [bt]]
+
+    if len(edge_index) == 0:
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+        edge_attr = torch.zeros((0, 1), dtype=torch.float)
+    else:
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+
+    return x, edge_index, edge_attr
 
 
 class TwoSidesDDI(InMemoryDataset):
     def __init__(self, root, subset_size=5000, transform=None, pre_transform=None):
         self.subset_size = subset_size
+
+        # allow safe PyG loading
+        try:
+            import torch.serialization as ts
+            import torch_geometric.data.data as tgdata
+            ts.add_safe_globals([tgdata.Data])
+        except:
+            pass
+
         super().__init__(root, transform, pre_transform)
 
-        # Load processed dataset
-        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
+        # load processed dataset
+        if os.path.exists(self.processed_paths[0]):
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -52,68 +74,87 @@ class TwoSidesDDI(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        return ["twosides_rdkit.pt"]
+        return ["processed_dataset.pt"]
+
+    def download(self):
+        return  # CSV must already exist
 
     def process(self):
-        print("Processing...")
+        print("STEP 1: Reading CSV...")
         df = pd.read_csv(self.raw_paths[0])
 
-        # Drop rows with missing SMILES
-        df = df.dropna(subset=["X1", "X2"])
+        df["X1"] = df["X1"].astype(str).str.strip()
+        df["X2"] = df["X2"].astype(str).str.strip()
+        df["Y"] = df["Y"].apply(lambda v: 1 if float(v) > 0 else 0)
 
-        # Reduce dataset size
-        df = df.sample(self.subset_size, random_state=42)
+        print("Remaining rows:", len(df))
 
-        # --- NEGATIVE SAMPLING (uses valid SMILES) ---
-        pos_pairs = df[["X1", "X2"]].values.tolist()
-        smiles_pool = list(df["X1"]) + list(df["X2"])
+        # BALANCE: 5000 positives + 5000 negatives
+        pos = df[df["Y"] == 1]
+        neg_pool = df[df["Y"] == 0]
 
-        neg_samples = set()
-        while len(neg_samples) < len(df):
-            a, b = random.sample(smiles_pool, 2)
-            if [a, b] not in pos_pairs:
-                neg_samples.add((a, b))
+        pos = pos.sample(n=self.subset_size, random_state=42)
+        neg = neg_pool.sample(n=self.subset_size, random_state=42)
 
-        neg_df = pd.DataFrame(list(neg_samples), columns=["X1", "X2"])
-        neg_df["Y"] = 0
+        df = pd.concat([pos, neg]).reset_index(drop=True)
+        print("Final dataset size:", len(df))
 
-        df_pos = df.copy()
-        df_pos["Y"] = 1
-
-        # Combine positive + negative
-        df_all = pd.concat([df_pos, neg_df], ignore_index=True)
-        df_all = df_all.sample(frac=1, random_state=42)
-
-        print(f"Final dataset size: {len(df_all)}")
-
+        print("STEP 2: Building graphs...")
         data_list = []
+        skipped = 0
 
-        for _, row in df_all.iterrows():
-            smi1 = row["X1"]
-            smi2 = row["X2"]
-            y = row["Y"]
-
-            mol1 = Chem.MolFromSmiles(smi1)
-            mol2 = Chem.MolFromSmiles(smi2)
+        for idx, row in df.iterrows():
+            smi1, smi2 = row["X1"], row["X2"]
+            mol1, mol2 = Chem.MolFromSmiles(smi1), Chem.MolFromSmiles(smi2)
 
             if mol1 is None or mol2 is None:
-                continue  # skip invalid SMILES
+                skipped += 1
+                continue
 
-            G1 = mol_to_graph(mol1, drug_flag=0)
-            G2 = mol_to_graph(mol2, drug_flag=1)
+            g1 = mol_to_graph(mol1)
+            g2 = mol_to_graph(mol2)
+            if g1 is None or g2 is None:
+                skipped += 1
+                continue
 
-            G = combine_graphs(G1, G2)
+            x1, e1, a1 = g1
+            x2, e2, a2 = g2
+            n1, n2 = x1.size(0), x2.size(0)
 
-            pyg = from_networkx(G)
+            # shift drug2 edges
+            e2 = e2 + n1
 
-            # Convert list of tensors → tensor matrix
-            pyg.x = torch.stack([feat for feat in pyg.x], dim=0)
+            x = torch.cat([x1, x2], dim=0)
+            edge_index = torch.cat([e1, e2], dim=1)
+            edge_attr = torch.cat([a1, a2], dim=0)
 
-            pyg.y = torch.tensor([y], dtype=torch.float)
+            # Morgan fingerprints -----------------------
+            try:
+                fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, radius=2, nBits=2048)
+                fp1 = torch.tensor(fp1, dtype=torch.float)
+            except:
+                fp1 = torch.zeros(2048)
 
-            data_list.append(pyg)
+            try:
+                fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, radius=2, nBits=2048)
+                fp2 = torch.tensor(fp2, dtype=torch.float)
+            except:
+                fp2 = torch.zeros(2048)
+            # ---------------------------------------------
 
-        data, slices = self.collate(data_list)
+            data = Data(
+                x=x,
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                y=torch.tensor([row["Y"]], dtype=torch.float),
+                split=torch.tensor([n1], dtype=torch.long),
+                fp1=fp1,
+                fp2=fp2
+            )
 
-        torch.save((data, slices), self.processed_paths[0])
-        print("RDKit graph processing complete.")
+            data_list.append(data)
+
+        print("Graphs built:", len(data_list))
+        print("Skipped rows:", skipped)
+        torch.save(self.collate(data_list), self.processed_paths[0])
+        print("Done!")

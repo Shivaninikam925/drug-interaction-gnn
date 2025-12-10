@@ -6,27 +6,27 @@ from dataset_loader import TwoSidesDDI
 from gnn_model import GNNDrugInteractionModel
 
 
-def split_dataset(dataset):
-    n = len(dataset)
-    return dataset[:int(n*0.8)], dataset[int(n*0.8):int(n*0.9)], dataset[int(n*0.9):]
-
-
-def train_one_epoch(model, loader, opt, loss_fn, device):
+def train_one_epoch(model, loader, optimizer, loss_fn, device):
     model.train()
     total = 0
+    count = 0
+
     for batch in loader:
         batch = batch.to(device)
-        pred = model(batch)
-        y = batch.y.view(-1)
 
-        loss = loss_fn(pred, y)
+        preds = model(batch)
+        labels = batch.y.view(-1).to(device)
 
-        opt.zero_grad()
+        loss = loss_fn(preds, labels)
+
+        optimizer.zero_grad()
         loss.backward()
-        opt.step()
+        optimizer.step()
 
         total += loss.item()
-    return total / len(loader)
+        count += 1
+
+    return total / count
 
 
 def evaluate(model, loader, device):
@@ -36,48 +36,64 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            pred = model(batch)
-            preds.extend(pred.cpu().numpy())
-            labels.extend(batch.y.view(-1).cpu().numpy())
 
-    preds_bin = [1 if p > 0.5 else 0 for p in preds]
+            p = model(batch).cpu().tolist()
+            l = batch.y.view(-1).cpu().tolist()
 
-    acc = accuracy_score(labels, preds_bin)
+            preds += p
+            labels += l
+
+    preds = torch.tensor(preds).numpy()
+    labels = torch.tensor(labels).numpy()
+
+    acc = accuracy_score(labels, (preds > 0.5).astype(int))
+
     try:
         roc = roc_auc_score(labels, preds)
     except:
         roc = float("nan")
-    pr = average_precision_score(labels, preds)
+
+    try:
+        pr = average_precision_score(labels, preds)
+    except:
+        pr = float("nan")
 
     return acc, roc, pr
 
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Using device:", device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using:", device)
 
-    # LOAD DATA
     dataset = TwoSidesDDI(root="data", subset_size=5000)
-    train_set, val_set, test_set = split_dataset(dataset)
-
-    train_loader = DataLoader(train_set, batch_size=32, shuffle=True)
-    val_loader   = DataLoader(val_set, batch_size=32)
-    test_loader  = DataLoader(test_set, batch_size=32)
+    print("Dataset size:", len(dataset))
 
     node_dim = dataset[0].x.size(1)
-    print("Node feature dim:", node_dim)
+
+    N = len(dataset)
+    train_ds = dataset[: int(0.8*N)]
+    val_ds   = dataset[int(0.8*N): int(0.9*N)]
+    test_ds  = dataset[int(0.9*N):]
+
+    print("\nTrain:", len(train_ds))
+    print("Val:  ", len(val_ds))
+    print("Test: ", len(test_ds))
+
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    val_loader   = DataLoader(val_ds, batch_size=32)
+    test_loader  = DataLoader(test_ds, batch_size=32)
 
     model = GNNDrugInteractionModel(node_dim).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = torch.nn.BCELoss()
 
     for epoch in range(1, 11):
         loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
         acc, roc, pr = evaluate(model, val_loader, device)
 
-        print(f"Epoch {epoch:02d} | Loss: {loss:.4f} | Val Acc: {acc:.4f} | ROC-AUC: {roc:.4f} | PR-AUC: {pr:.4f}")
+        print(f"Epoch {epoch:02d} | Loss {loss:.4f} | Acc {acc:.4f} | ROC {roc} | PR {pr}")
 
-    print("\nFinal Test:")
+    print("\nFINAL TEST RESULTS:")
     acc, roc, pr = evaluate(model, test_loader, device)
     print("Accuracy:", acc)
     print("ROC-AUC:", roc)
