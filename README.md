@@ -1,93 +1,127 @@
-# Drug–Drug Interaction Prediction Using Graph Neural Networks
+# Drug–Drug Interaction Prediction using Graph Neural Networks
 
-This repository implements a graph neural network (GNN) for predicting potential drug–drug interactions (DDIs) using the TWOSIDES dataset.
-The project converts drug pairs into lightweight graph structures and trains a GCN-based model to learn patterns associated with adverse interactions.
-It is designed as a clear, extensible baseline for future research involving chemical features, molecular graphs, and large-scale pharmacological reasoning.
+## Overview
+Drug–drug interactions (DDIs) pose significant risks in clinical settings, often leading to adverse drug reactions and treatment failure. Predicting DDIs computationally can reduce experimental costs and improve patient safety.
 
-## Project Overview
+This project implements a Graph Neural Network (GNN)–based pipeline to predict drug–drug interactions from molecular structure data. Each drug molecule is represented as a graph derived from its SMILES string, and a pairwise GNN model is trained to classify whether two drugs interact.
 
-Drug–drug interactions can contribute to significant clinical risk, especially in polypharmacy settings.
-This work builds a simple but research-oriented pipeline that:
+The focus of this work is on clean dataset construction, safe negative sampling, and robust evaluation, rather than achieving state-of-the-art performance.
 
-Represents each drug pair as a small graph
+## Key Ideas
 
-Learns relational patterns using graph convolutional networks
+(1)Represent drug molecules as graphs (atoms as nodes, bonds as edges)
 
-Predicts whether a given drug pair is likely to interact
+(2)Encode each drug using a Graph Convolutional Network (GCN)
 
-Establishes a baseline for more sophisticated chemical-feature models
+(3)Learn interaction patterns by combining embeddings of two drugs
 
-The intention is to provide an interpretable, reproducible framework that can support academic research, collaboration, and downstream model development.
+(4)Handle extreme class imbalance using safe, balanced negative sampling
 
-## Dataset: TWOSIDES
+(5)Evaluate using ROC-AUC and PR-AUC, which are appropriate for imbalanced data
 
-The TWOSIDES dataset contains:
+## Dataset
 
-Drug A identifier (ID1)
+>> Source: TwoSides Drug–Drug Interaction Dataset
 
-Drug B identifier (ID2)
+>> Raw size: ~4.6 million rows
 
-Binary interaction label
+>> Processed subset: ~10,000 drug pairs (balanced positives & negatives)
 
-Optional side-effect descriptions 
+Label Processing:
 
-For efficient experimentation, the current workflow processes a 10,000-sample subset, though the code supports the complete dataset.
+Original interaction counts were converted to binary labels:
 
-Reference:
-Tatonetti NP et al. Data-driven prediction of drug effects and interactions. Science Translational Medicine, 2012.
+ >> Y > 0 → 1 (interaction present)
+
+ >> Y = 0 → 0 (no interaction)
+
+Negative Sampling Strategy:
+
+To avoid label noise and invalid molecules:
+
+>> Negatives are generated only from drugs appearing in positive samples
+
+>> Ensures all SMILES strings are valid and parsable
+
+>> Produces a balanced dataset suitable for supervised learning
 
 ## Model Architecture
 
-The model is intentionally simple and serves as a strong baseline:
+>> Node features: Basic atomic properties (atomic number, degree, valence, aromaticity, etc.)
 
-Learned embeddings for drug identifiers
+>> Encoder: Two-layer Graph Convolutional Network (GCN)
 
-Two GCNConv layers for message passing
+>> Pooling: Global mean pooling per molecule
 
-Global mean pooling to obtain graph-level representations
+>> Classifier: MLP over concatenated embeddings of two drugs
 
-A final linear layer for binary classification
+>> Loss: Binary Cross-Entropy (BCE)
 
-### Architecture Diagram
- Drug A (node) ----\
-                     → GCN → ReLU → GCN → GlobalMeanPool → Linear → Sigmoid
- Drug B (node) ----/
+## Results (Baseline)
 
+| Metric   | Value |
+| -------- | ----- |
+| Accuracy | ~0.55 |
+| ROC-AUC  | ~0.59 |
+| PR-AUC   | ~0.56 |
 
-This design focuses on relational structure rather than chemical features.
+These results indicate that the model learns a non-random interaction signal, despite using simple features and a lightweight architecture.
 
-## Training Results
+## Project Structure
 
-Using 10,000 samples and a basic two-layer GCN:
+drug-interaction-gnn/
+│
+├── data/
+│   ├── raw/                # Original CSV (two-sides.csv)
+│   └── processed/          # Cached PyG dataset
+│
+├── src/
+│   ├── dataset_loader.py   # Data cleaning, graph construction, sampling
+│   ├── gnn_model.py        # GNN architecture
+│   └── train.py            # Training & evaluation loop
+│
+├── results/
+│   └── results_summary.pkl # Saved metrics & predictions
+│
+└── README.md
 
-Loss converges rapidly
+## Limitations
 
-Test accuracy reaches approximately 99%
-(expected given identifier-only embeddings)
+>> Uses simple atom features (no fingerprints or pretrained embeddings)
 
-Future work will replace ID embeddings with chemical fingerprints to produce more realistic results.
+>> GCN baseline only (no attention or message-passing enhancements)
 
-## Relevant Literature
+>> Subsampled dataset for computational feasibility
 
-Tatonetti NP et al. Data-driven prediction of drug effects and interactions. Sci Transl Med, 2012.
+>> These limitations are intentional to establish a clean, interpretable baseline.
 
-Zitnik M, Agrawal M, Leskovec J. Modeling polypharmacy side effects using graph convolutional networks. Bioinformatics, 2018.
+## Future Work
 
-Gaudelet T et al. Utilizing graph machine learning within drug discovery and development. Nat Rev Drug Discov, 2021.
+>> Incorporate bond features and edge embeddings
 
-## Citation
+>> Add Morgan fingerprints or pretrained molecular embeddings
 
-If you use or reference this project:
+>> Explore Graph Attention Networks (GATs)
 
-@misc{ddi-gnn-2025,
-  author       = {Shivani},
-  title        = {Drug–Drug Interaction Prediction using Graph Neural Networks},
-  year         = {2025},
-  note         = {GitHub repository},
-  url          = {https://github.com/Shivaninikam925/drug-interaction-gnn}
-}
+>> Train on larger subsets or full dataset
 
-## Contact
+>> Extend to multi-class interaction types
 
-If you are a researcher or professor interested in discussing this work or exploring collaboration opportunities, feel free to reach out.
+## Why This Project Matters
+
+This project demonstrates:
+
+>> End-to-end ML research workflow
+
+>> Careful data handling in noisy biomedical datasets
+
+>> Correct evaluation for imbalanced classification
+
+>> Strong foundation for further research in computational biology and ML
+
+## Author
+
+Shivani Nikam
+Second-year B.Tech CSE student 
+Interests: Machine Learning, Graph Neural Networks, Computational Biology, Research
 
