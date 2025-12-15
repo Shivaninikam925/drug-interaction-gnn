@@ -21,11 +21,11 @@ The focus of this work is on clean dataset construction, safe negative sampling,
 
 ## Dataset
 
->> Source: TwoSides Drug–Drug Interaction Dataset
+(1)Source: TwoSides Drug–Drug Interaction Dataset
 
->> Raw size: ~4.6 million rows
+(2)Raw size: ~4.6 million rows
 
->> Processed subset: ~10,000 drug pairs (balanced positives & negatives)
+(3)Processed subset: ~10,000 drug pairs (balanced positives & negatives)
 
 Label Processing:
 
@@ -39,23 +39,23 @@ Negative Sampling Strategy:
 
 To avoid label noise and invalid molecules:
 
->> Negatives are generated only from drugs appearing in positive samples
+(1)Negatives are generated only from drugs appearing in positive samples
 
->> Ensures all SMILES strings are valid and parsable
+(2)Ensures all SMILES strings are valid and parsable
 
->> Produces a balanced dataset suitable for supervised learning
+(3)Produce a balanced dataset suitable for supervised learning
 
 ## Model Architecture
 
->> Node features: Basic atomic properties (atomic number, degree, valence, aromaticity, etc.)
+(1)Node features: Basic atomic properties (atomic number, degree, valence, aromaticity, etc.)
 
->> Encoder: Two-layer Graph Convolutional Network (GCN)
+(2)Encoder: Two-layer Graph Convolutional Network (GCN)
 
->> Pooling: Global mean pooling per molecule
+(3)Pooling: Global mean pooling per molecule
 
->> Classifier: MLP over concatenated embeddings of two drugs
+(4)Classifier: MLP over concatenated embeddings of two drugs
 
->> Loss: Binary Cross-Entropy (BCE)
+(5)Loss: Binary Cross-Entropy (BCE)
 
 ## Results (Baseline)
 
@@ -67,61 +67,44 @@ To avoid label noise and invalid molecules:
 
 These results indicate that the model learns a non-random interaction signal, despite using simple features and a lightweight architecture.
 
-## Project Structure
-
-drug-interaction-gnn/
-│
-├── data/
-│   ├── raw/                # Original CSV (two-sides.csv)
-│   └── processed/          # Cached PyG dataset
-│
-├── src/
-│   ├── dataset_loader.py   # Data cleaning, graph construction, sampling
-│   ├── gnn_model.py        # GNN architecture
-│   └── train.py            # Training & evaluation loop
-│
-├── results/
-│   └── results_summary.pkl # Saved metrics & predictions
-│
-└── README.md
-
 ## Limitations
 
->> Uses simple atom features (no fingerprints or pretrained embeddings)
+(1)Uses simple atom features (no fingerprints or pretrained embeddings)
 
->> GCN baseline only (no attention or message-passing enhancements)
+(2)GCN baseline only (no attention or message-passing enhancements)
 
->> Subsampled dataset for computational feasibility
+(3)Subsampled dataset for computational feasibility
 
->> These limitations are intentional to establish a clean, interpretable baseline.
+(4)These limitations are intentional to establish a clean, interpretable baseline.
 
 ## Future Work
 
->> Incorporate bond features and edge embeddings
+(1)Incorporate bond features and edge embeddings
 
->> Add Morgan fingerprints or pretrained molecular embeddings
+(2)Add Morgan fingerprints or pretrained molecular embeddings
 
->> Explore Graph Attention Networks (GATs)
+(3)Explore Graph Attention Networks (GATs)
 
->> Train on larger subsets or full dataset
+(4)Train on larger subsets or full dataset
 
->> Extend to multi-class interaction types
+(5)Extend to multi-class interaction types
 
 ## Why This Project Matters
 
 This project demonstrates:
 
->> End-to-end ML research workflow
+(1)End-to-end ML research workflow
 
->> Careful data handling in noisy biomedical datasets
+(2)Careful data handling in noisy biomedical datasets
 
->> Correct evaluation for imbalanced classification
+(3)Correct evaluation for imbalanced classification
 
->> Strong foundation for further research in computational biology and ML
+(4)Strong foundation for further research in computational biology and ML
 
 ## Author
 
 Shivani Nikam
 Second-year B.Tech CSE student 
+Github link: https://github.com/Shivaninikam925
 Interests: Machine Learning, Graph Neural Networks, Computational Biology, Research
 
