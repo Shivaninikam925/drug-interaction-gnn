@@ -2,10 +2,9 @@ import os
 import torch
 import pandas as pd
 import numpy as np
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit import RDLogger
 from torch_geometric.data import Data, InMemoryDataset
+from rdkit import Chem
+from rdkit import RDLogger
 
 RDLogger.DisableLog('rdApp.*')
 
@@ -16,13 +15,13 @@ def atom_features(atom):
         atom.GetDegree(),
         atom.GetFormalCharge(),
         atom.GetTotalNumHs(),
-        int(atom.GetIsAromatic()),
+        1 if atom.GetIsAromatic() else 0,
         int(atom.GetImplicitValence()),
         int(atom.GetExplicitValence()),
     ], dtype=torch.float)
 
 
-def mol_to_graph(mol):
+def mol_to_graph_data_obj(mol):
     if mol is None:
         return None
 
@@ -30,13 +29,12 @@ def mol_to_graph(mol):
     if len(atoms) == 0:
         return None
 
-    x = torch.stack([atom_features(a) for a in atoms], dim=0)
+    x = torch.stack([atom_features(a) for a in atoms])
 
-    edge_index = []
-    edge_attr = []
-    for b in mol.GetBonds():
-        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
-        bt = float(b.GetBondTypeAsDouble())
+    edge_index, edge_attr = [], []
+    for bond in mol.GetBonds():
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        bt = float(bond.GetBondTypeAsDouble())
         edge_index += [[i, j], [j, i]]
         edge_attr += [[bt], [bt]]
 
@@ -44,27 +42,17 @@ def mol_to_graph(mol):
         edge_index = torch.zeros((2, 0), dtype=torch.long)
         edge_attr = torch.zeros((0, 1), dtype=torch.float)
     else:
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t()
         edge_attr = torch.tensor(edge_attr, dtype=torch.float)
 
     return x, edge_index, edge_attr
 
 
 class TwoSidesDDI(InMemoryDataset):
-    def __init__(self, root, subset_size=5000, transform=None, pre_transform=None):
+    def __init__(self, root, subset_size=5000):
         self.subset_size = subset_size
+        super().__init__(root)
 
-        # allow safe PyG loading
-        try:
-            import torch.serialization as ts
-            import torch_geometric.data.data as tgdata
-            ts.add_safe_globals([tgdata.Data])
-        except:
-            pass
-
-        super().__init__(root, transform, pre_transform)
-
-        # load processed dataset
         if os.path.exists(self.processed_paths[0]):
             self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
@@ -76,85 +64,77 @@ class TwoSidesDDI(InMemoryDataset):
     def processed_file_names(self):
         return ["processed_dataset.pt"]
 
-    def download(self):
-        return  # CSV must already exist
-
     def process(self):
         print("STEP 1: Reading CSV...")
         df = pd.read_csv(self.raw_paths[0])
+        print("Total rows:", len(df))
 
         df["X1"] = df["X1"].astype(str).str.strip()
         df["X2"] = df["X2"].astype(str).str.strip()
-        df["Y"] = df["Y"].apply(lambda v: 1 if float(v) > 0 else 0)
-
+        df = df[~df["X1"].isin(["nan", ""]) & ~df["X2"].isin(["nan", ""])]
         print("Remaining rows:", len(df))
 
-        # BALANCE: 5000 positives + 5000 negatives
-        pos = df[df["Y"] == 1]
-        neg_pool = df[df["Y"] == 0]
+        df["Y"] = df["Y"].apply(lambda v: 1 if float(v) > 0 else 0)
 
-        pos = pos.sample(n=self.subset_size, random_state=42)
-        neg = neg_pool.sample(n=self.subset_size, random_state=42)
+        if len(df) > self.subset_size:
+            df = df.sample(self.subset_size, random_state=42)
 
-        df = pd.concat([pos, neg]).reset_index(drop=True)
-        print("Final dataset size:", len(df))
+        df_pos = df[df["Y"] == 1].reset_index(drop=True)
+        print("Positives selected:", len(df_pos))
+
+        # SAFE NEGATIVE SAMPLING
+        smiles_map = {}
+        for _, r in df_pos.iterrows():
+            smiles_map[r["ID1"]] = r["X1"]
+            smiles_map[r["ID2"]] = r["X2"]
+
+        ids = list(smiles_map.keys())
+        neg_rows = []
+
+        while len(neg_rows) < len(df_pos):
+            d1, d2 = np.random.choice(ids, 2, replace=False)
+            neg_rows.append([d1, d2, 0, smiles_map[d1], smiles_map[d2]])
+
+        df_neg = pd.DataFrame(neg_rows, columns=["ID1", "ID2", "Y", "X1", "X2"])
+
+        # ✅ CRITICAL FIX: SHUFFLE BEFORE SPLIT
+        df_final = pd.concat([df_pos, df_neg], ignore_index=True)\
+                      .sample(frac=1.0, random_state=42)\
+                      .reset_index(drop=True)
+
+        print("Final dataset size:", len(df_final))
 
         print("STEP 2: Building graphs...")
         data_list = []
-        skipped = 0
 
-        for idx, row in df.iterrows():
-            smi1, smi2 = row["X1"], row["X2"]
-            mol1, mol2 = Chem.MolFromSmiles(smi1), Chem.MolFromSmiles(smi2)
-
+        for _, row in df_final.iterrows():
+            mol1, mol2 = Chem.MolFromSmiles(row["X1"]), Chem.MolFromSmiles(row["X2"])
             if mol1 is None or mol2 is None:
-                skipped += 1
                 continue
 
-            g1 = mol_to_graph(mol1)
-            g2 = mol_to_graph(mol2)
+            g1, g2 = mol_to_graph_data_obj(mol1), mol_to_graph_data_obj(mol2)
             if g1 is None or g2 is None:
-                skipped += 1
                 continue
 
             x1, e1, a1 = g1
             x2, e2, a2 = g2
-            n1, n2 = x1.size(0), x2.size(0)
+            n1 = x1.size(0)
 
-            # shift drug2 edges
-            e2 = e2 + n1
+            if e2.numel() > 0:
+                e2 = e2 + n1
 
-            x = torch.cat([x1, x2], dim=0)
-            edge_index = torch.cat([e1, e2], dim=1)
-            edge_attr = torch.cat([a1, a2], dim=0)
-
-            # Morgan fingerprints -----------------------
-            try:
-                fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, radius=2, nBits=2048)
-                fp1 = torch.tensor(fp1, dtype=torch.float)
-            except:
-                fp1 = torch.zeros(2048)
-
-            try:
-                fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, radius=2, nBits=2048)
-                fp2 = torch.tensor(fp2, dtype=torch.float)
-            except:
-                fp2 = torch.zeros(2048)
-            # ---------------------------------------------
+            x = torch.cat([x1, x2])
+            e = torch.cat([e1, e2], dim=1) if e1.numel() or e2.numel() else torch.zeros((2, 0), dtype=torch.long)
+            a = torch.cat([a1, a2]) if a1.numel() or a2.numel() else torch.zeros((0, 1))
 
             data = Data(
                 x=x,
-                edge_index=edge_index,
-                edge_attr=edge_attr,
+                edge_index=e,
+                edge_attr=a,
                 y=torch.tensor([row["Y"]], dtype=torch.float),
-                split=torch.tensor([n1], dtype=torch.long),
-                fp1=fp1,
-                fp2=fp2
+                split=torch.tensor([n1], dtype=torch.long)
             )
-
             data_list.append(data)
 
-        print("Graphs built:", len(data_list))
-        print("Skipped rows:", skipped)
         torch.save(self.collate(data_list), self.processed_paths[0])
         print("Done!")
